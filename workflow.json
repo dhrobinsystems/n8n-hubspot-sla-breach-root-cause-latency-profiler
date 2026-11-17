@@ -1,0 +1,850 @@
+{
+  "name": "HubSpot Speed-to-Lead SLA Breach Root-Cause Latency Profiler (Safe-by-Default)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Speed-to-Lead SLA Breach Root-Cause Profiler\n\n**Safe by default.** With no env vars this runs in **SANDBOX_MODE** on a synthetic fixture (portal 99000001): zero network calls, nothing posted, no CRM updates. Slack / Teams payloads appear in **Dry-Run Preview**.\n\nGo-live needs explicit opt-ins:\n`SANDBOX_MODE=false` · `DRY_RUN=false` · `NOTIFICATIONS_ENABLED=true` (+ webhook URL in env, host allowlisted) · optional `HUBSPOT_MUTATIONS_ENABLED=true` (SLA fields on contacts).\n\nFail-closed: failed / truncated searches abort; anomaly ratio blocks posting. Only timestamps, owner IDs and lead source are fetched. Secrets only via `$env`. See README.md.",
+        "height": 360,
+        "width": 560,
+        "color": 4
+      },
+      "id": "c197da81-0250-467c-a1f4-78e5b4c04b1d",
+      "name": "Safety Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        -480
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b294c5a0-a69d-4ff6-acb9-9660088d1175",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hubspot-sla-latency",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "2d1b87eb-76f0-4be1-afd0-d8bbc47116a3",
+      "name": "SLA Profiler Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        120
+      ],
+      "webhookId": "bfd68f78-c7eb-483e-a937-9610c09e34df",
+      "notes": "POST {\"as_of\":\"2026-11-16T10:00:00Z\",\"window_hours\":168} (both optional) with header x-sla-secret (required in live mode)."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "53 7 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "882df760-cf15-4a18-a01c-137855effd53",
+      "name": "Weekly Schedule (Mon 07:53)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -460,
+        300
+      ],
+      "notes": "Mondays 07:53 in the instance time zone. Ships inactive."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Config & Safety Gate\n// Env-only configuration, fail-safe flags, analysis window, SLA budgets,\n// business-hours clock, webhook authentication and notification allowlisting.\n//   * Safe-ON  (SANDBOX_MODE, DRY_RUN) turn OFF only on false/0/no/off.\n//   * Safe-OFF (NOTIFICATIONS_ENABLED, HUBSPOT_MUTATIONS_ENABLED, ...) turn ON\n//     only on true/1/yes/on. Typos keep the safe value. Blocked $env => safe.\n// Webhook URLs are secrets: only \"set / host allowed\" booleans leave this node.\n// ============================================================================\nconst TRUTHY = ['true', '1', 'yes', 'on'];\nconst FALSY = ['false', '0', 'no', 'off'];\nlet envBlocked = false;\nfunction readEnv(key) {\n  try {\n    const v = $env[key];\n    return v === undefined || v === null ? '' : String(v).trim();\n  } catch (e) {\n    envBlocked = true;\n    return '';\n  }\n}\nconst str = (k, d = '') => readEnv(k) || d;\nconst safeOn = (k) => !FALSY.includes(readEnv(k).toLowerCase());\nconst safeOff = (k) => TRUTHY.includes(readEnv(k).toLowerCase());\nconst list = (k, d = '') => (readEnv(k) || d).split(',').map((s) => s.trim()).filter(Boolean);\nconst prop = (k, d) => (readEnv(k) || d).replace(/[^a-z0-9_]/gi, '');\nconst configErrors = [];\nconst warnings = [];\nconst intIn = (k, d, min, max) => {\n  const raw = readEnv(k);\n  if (raw === '') return d;\n  const n = Number(raw);\n  if (!Number.isInteger(n) || n < min || n > max) { configErrors.push(`${k} must be an integer ${min}-${max} (got \"${raw}\")`); return d; }\n  return n;\n};\nconst numIn = (k, d, min, max) => {\n  const raw = readEnv(k);\n  if (raw === '') return d;\n  const n = Number(raw);\n  if (!/^\\d+(\\.\\d+)?$/.test(raw) || n < min || n > max) { configErrors.push(`${k} must be a number ${min}-${max} (got \"${raw}\")`); return d; }\n  return n;\n};\nconst parseYmd = (s) => {\n  const m = String(s || '').match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);\n  if (!m) return null;\n  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));\n  return new Date(ms).toISOString().slice(0, 10) === m[0] ? ms : null;\n};\n\nconst sandboxMode = safeOn('SANDBOX_MODE');\nconst dryRun = safeOn('DRY_RUN');\nconst notificationsEnabled = safeOff('NOTIFICATIONS_ENABLED');\nconst hubspotMutationsEnabled = safeOff('HUBSPOT_MUTATIONS_ENABLED');\nconst hasHubspotToken = readEnv('HUBSPOT_ACCESS_TOKEN') !== '';\nconst hasWebhookSecret = readEnv('WEBHOOK_SHARED_SECRET').length >= 16;\nconst configuredPortalId = str('HUBSPOT_PORTAL_ID');\nif (!sandboxMode) {\n  const problems = [];\n  if (!hasHubspotToken) problems.push('HUBSPOT_ACCESS_TOKEN is not set');\n  if (!/^\\d{1,12}$/.test(configuredPortalId)) problems.push('HUBSPOT_PORTAL_ID must be a numeric HubSpot portal ID');\n  if (problems.length) throw new Error('Live mode (SANDBOX_MODE=false) refused: ' + problems.join('; ') + '. Fix the variables or keep SANDBOX_MODE=true.');\n}\n\n// ---- Trigger & webhook auth ---------------------------------------------------\nfunction constantTimeEqual(a, b) {\n  const x = String(a || ''), y = String(b || '');\n  const len = Math.max(x.length, y.length);\n  let diff = x.length ^ y.length;\n  for (let i = 0; i < len; i++) diff |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);\n  return diff === 0 && x.length > 0;\n}\nconst raw = $input.first().json || {};\nconst isWebhook = raw && typeof raw === 'object' && 'body' in raw && 'headers' in raw;\nlet requested = {};\nif (isWebhook) {\n  const headers = Object.fromEntries(Object.entries(raw.headers || {}).map(([k, v]) => [String(k).toLowerCase(), v]));\n  const query = raw.query && typeof raw.query === 'object' ? raw.query : {};\n  const provided = headers['x-sla-secret'] !== undefined ? headers['x-sla-secret'] : query.sla_secret;\n  if (!sandboxMode && !(hasWebhookSecret && constantTimeEqual(provided, readEnv('WEBHOOK_SHARED_SECRET')))) {\n    throw new Error('Webhook rejected: WEBHOOK_SHARED_SECRET (16+ chars) must be set and sent as header x-sla-secret (or ?sla_secret=).');\n  }\n  const b = raw.body && typeof raw.body === 'object' ? raw.body : {};\n  requested = { asOf: b.as_of ? String(b.as_of).trim() : '', windowHours: b.window_hours !== undefined ? String(b.window_hours) : '' };\n}\n\n// ---- Analysis window (UTC, minute precision) -----------------------------------\nconst nowMs = (() => {\n  const o = str('NOW_OVERRIDE');\n  return o && !Number.isNaN(Date.parse(o)) ? Date.parse(o) : Date.now();\n})();\nconst asOfRaw = requested.asOf || str('AS_OF');\nlet asOfMs = nowMs;\nif (asOfRaw) {\n  if (!/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d{1,3})?)?Z$/.test(asOfRaw) || Number.isNaN(Date.parse(asOfRaw))) throw new Error(`Invalid as-of \"${asOfRaw}\"; expected an ISO UTC timestamp such as 2026-11-16T10:00:00Z.`);\n  asOfMs = Date.parse(asOfRaw);\n}\nif (asOfMs > nowMs + 60000) throw new Error('As-of timestamp is in the future.');\nasOfMs = Math.floor(asOfMs / 60000) * 60000;\nlet windowHours = intIn('WINDOW_HOURS', 168, 1, 2160);\nif (requested.windowHours) {\n  const n = Number(requested.windowHours);\n  if (!Number.isInteger(n) || n < 1 || n > 2160) throw new Error('window_hours must be an integer 1-2160.');\n  windowHours = n;\n}\nconst windowStartMs = asOfMs - windowHours * 3600000;\n\n// ---- SLA budgets (minutes) and clock -------------------------------------------\nconst hops = [\n  { key: 'ingest', short: 'submit → ingest', label: 'Form submit → webhook ingest', from: 'submit', to: 'ingest', budgetMin: numIn('HOP_SLA_INGEST_MINUTES', 2, 0.1, 10080), category: 'INGEST_DELAY' },\n  { key: 'enrich', short: 'ingest → enrich', label: 'Ingest → enrichment', from: 'ingest', to: 'enrich', budgetMin: numIn('HOP_SLA_ENRICH_MINUTES', 5, 0.1, 10080), category: 'ENRICHMENT_DELAY' },\n  { key: 'assign', short: 'enrich → assign', label: 'Enrichment → owner assignment', from: 'enrich', to: 'assign', budgetMin: numIn('HOP_SLA_ASSIGN_MINUTES', 5, 0.1, 10080), category: 'ASSIGNMENT_DELAY' },\n  { key: 'dial', short: 'assign → first dial', label: 'Owner assignment → first dial', from: 'assign', to: 'dial', budgetMin: numIn('HOP_SLA_FIRST_DIAL_MINUTES', 15, 0.1, 10080), category: 'FIRST_DIAL_DELAY' },\n];\nconst totalSlaMin = numIn('TOTAL_SLA_MINUTES', 30, 0.1, 43200);\nconst hopSum = hops.reduce((s, h) => s + h.budgetMin, 0);\nif (hopSum > totalSlaMin + 1e-9) warnings.push(`Hop budgets add up to ${hopSum} min, more than TOTAL_SLA_MINUTES=${totalSlaMin}; a lead can meet every hop and still breach.`);\nconst clock = str('SLA_CLOCK', 'wall').toLowerCase() === 'business' ? 'business' : 'wall';\nconst bh = str('BUSINESS_HOURS', '09:00-18:00').match(/^([01]\\d|2[0-3]):([0-5]\\d)-([01]\\d|2[0-4]):([0-5]\\d)$/);\nlet openMin = 540, closeMin = 1080;\nif (!bh) configErrors.push('BUSINESS_HOURS must be HH:MM-HH:MM');\nelse { openMin = Number(bh[1]) * 60 + Number(bh[2]); closeMin = Number(bh[3]) * 60 + Number(bh[4]); if (closeMin <= openMin) configErrors.push('BUSINESS_HOURS close must be after open'); }\nconst businessDays = list('BUSINESS_DAYS', '1,2,3,4,5').map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);\nif (clock === 'business' && !businessDays.length) configErrors.push('BUSINESS_DAYS must list weekdays 0-6 (0 = Sunday)');\nconst holidays = [];\nfor (const h of list('BUSINESS_HOLIDAYS')) { const ms = parseYmd(h); if (ms === null) configErrors.push(`BUSINESS_HOLIDAYS entry \"${h}\" is not YYYY-MM-DD`); else holidays.push(new Date(ms).toISOString().slice(0, 10)); }\nconst utcOffsetMin = intIn('SLA_UTC_OFFSET_MINUTES', 0, -840, 840);\n\n// ---- Notification destinations ------------------------------------------------\nconst channels = list('NOTIFY_CHANNELS', 'slack').map((c) => c.toLowerCase()).filter((c) => ['slack', 'teams'].includes(c));\nconst allowedSuffixes = list('NOTIFY_ALLOWED_HOST_SUFFIXES', 'hooks.slack.com,.logic.azure.com,.powerplatform.com,.powerautomate.com');\nfunction checkUrl(key) {\n  const v = readEnv(key);\n  if (!v) return { set: false, valid: false, host: null, reason: `${key} is not set` };\n  // Strict parse without relying on the URL global (not available in every sandbox).\n  const m = v.match(/^(https?):\\/\\/([a-z0-9.-]+)(?::(\\d{1,5}))?(\\/[^\\s]*)?$/i);\n  if (!m || /@/.test(v.split('/').slice(0, 3).join('/'))) return { set: true, valid: false, host: null, reason: `${key} is not a valid URL` };\n  const protocol = m[1].toLowerCase();\n  const host = m[2].toLowerCase();\n  const hostOk = allowedSuffixes.some((s) => (s.startsWith('.') ? host.endsWith(s) : host === s));\n  const httpsOk = protocol === 'https' || (protocol === 'http' && /^(127\\.0\\.0\\.1|localhost)$/.test(host) && allowedSuffixes.includes(host));\n  if (!httpsOk) return { set: true, valid: false, host, reason: `${key} must use https` };\n  if (!hostOk) return { set: true, valid: false, host, reason: `${key} host ${host} is not in NOTIFY_ALLOWED_HOST_SUFFIXES` };\n  return { set: true, valid: true, host, reason: null };\n}\nconst dest = { slack: checkUrl('SLACK_WEBHOOK_URL'), teams: checkUrl('TEAMS_WEBHOOK_URL') };\nconst notifyBlockers = [];\nif (sandboxMode) notifyBlockers.push('SANDBOX_MODE=true (synthetic fixture run)');\nif (dryRun) notifyBlockers.push('DRY_RUN=true');\nif (!notificationsEnabled) notifyBlockers.push('NOTIFICATIONS_ENABLED is not true');\nif (!channels.length) notifyBlockers.push('NOTIFY_CHANNELS lists no supported channel (slack, teams)');\nfor (const c of channels) if (!dest[c].valid) notifyBlockers.push(dest[c].reason);\nif (envBlocked) notifyBlockers.push('n8n blocked $env access');\nif (configErrors.length) notifyBlockers.push(`${configErrors.length} configuration error(s)`);\n\nconst stampBlockers = [];\nif (sandboxMode) stampBlockers.push('SANDBOX_MODE=true');\nif (dryRun) stampBlockers.push('DRY_RUN=true');\nif (!hubspotMutationsEnabled) stampBlockers.push('HUBSPOT_MUTATIONS_ENABLED is not true');\nif (envBlocked) stampBlockers.push('n8n blocked $env access');\nif (configErrors.length) stampBlockers.push(`${configErrors.length} configuration error(s)`);\n\nconst props = {\n  submit: prop('FORM_SUBMIT_PROPERTY', 'first_conversion_date'),\n  ingest: prop('INGEST_TIMESTAMP_PROPERTY', 'lead_ingested_at'),\n  enrich: prop('ENRICHMENT_TIMESTAMP_PROPERTY', 'lead_enriched_at'),\n  assign: prop('OWNER_ASSIGNED_PROPERTY', 'hubspot_owner_assigneddate'),\n  dial: prop('FIRST_DIAL_PROPERTY', 'hs_sa_first_engagement_date'),\n  owner: 'hubspot_owner_id',\n  source: prop('LEAD_SOURCE_PROPERTY', 'hs_analytics_source'),\n  stampStatus: prop('STAMP_STATUS_PROPERTY', 'sla_status'),\n  stampRootCause: prop('STAMP_ROOT_CAUSE_PROPERTY', 'sla_root_cause'),\n  stampMinutes: prop('STAMP_SPEED_TO_LEAD_PROPERTY', 'sla_speed_to_lead_minutes'),\n  stampAnalyzedAt: prop('STAMP_ANALYZED_AT_PROPERTY', 'sla_analyzed_at'),\n};\nconst config = {\n  runId: 'sla-' + new Date(nowMs).toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.random().toString(36).slice(2, 8),\n  now: new Date(nowMs).toISOString(),\n  envBlocked,\n  sandboxMode,\n  dryRun,\n  portalId: sandboxMode ? '99000001' : configuredPortalId,\n  trigger: isWebhook ? 'webhook' : 'manual-or-schedule',\n  window: { hours: windowHours, startMs: windowStartMs, endMs: asOfMs, startIso: new Date(windowStartMs).toISOString(), asOfIso: new Date(asOfMs).toISOString(), source: requested.asOf ? 'webhook' : asOfRaw ? 'env' : 'now' },\n  sla: {\n    hops,\n    totalMin: totalSlaMin,\n    clock,\n    business: { openMin, closeMin, days: businessDays, holidays, utcOffsetMin },\n    skewToleranceSec: intIn('CLOCK_SKEW_TOLERANCE_SECONDS', 60, 0, 3600),\n    enrichmentOptional: safeOn('ENRICHMENT_OPTIONAL'),\n    lifecycleStages: list('LIFECYCLE_STAGES').filter((s) => /^[a-z0-9_-]{1,64}$/i.test(s)),\n  },\n  guards: { maxAnomalyPct: numIn('MAX_ANOMALY_PCT', 20, 0, 100), minLeads: intIn('MIN_LEADS_TO_POST', 1, 0, 100000) },\n  display: { repLabel: str('REP_LABEL', 'name').toLowerCase() === 'id' ? 'id' : 'name', maxOpenBreaches: intIn('MAX_OPEN_BREACHES_LISTED', 5, 0, 20), maxOwners: intIn('MAX_OWNERS_LISTED', 5, 0, 20), title: str('REPORT_TITLE', 'Speed-to-Lead SLA: Breach Root Cause').slice(0, 80) },\n  hubspot: {\n    apiBase: str('HUBSPOT_API_BASE_URL', 'https://api.hubapi.com').replace(/\\/+$/, ''),\n    appBase: str('HUBSPOT_APP_BASE_URL', 'https://app.hubspot.com').replace(/\\/+$/, ''),\n    props,\n    pageSize: intIn('HUBSPOT_SEARCH_PAGE_SIZE', 200, 10, 200),\n    maxSearchPages: 50,\n    mutationsEnabled: hubspotMutationsEnabled,\n    stampAllowed: stampBlockers.length === 0,\n    stampBlockers,\n  },\n  notify: {\n    enabled: notificationsEnabled,\n    channels,\n    destinations: { slack: { set: dest.slack.set, valid: dest.slack.valid, host: dest.slack.host }, teams: { set: dest.teams.set, valid: dest.teams.valid, host: dest.teams.host } },\n    allowedByConfig: notifyBlockers.length === 0,\n    blockers: notifyBlockers,\n    forceRepost: safeOff('FORCE_REPOST'),\n  },\n  configErrors,\n  warnings,\n};\nconst safetyDecisions = [\n  `Mode: ${sandboxMode ? 'SANDBOX (synthetic fixture, zero network calls)' : 'LIVE (read-only HubSpot search)'}`,\n  `Window: ${config.window.startIso} → ${config.window.asOfIso} (${windowHours} h)`,\n  `SLA: ${totalSlaMin} min total, hops ${hops.map((h) => h.key + '=' + h.budgetMin).join(' / ')} min, ${clock} clock`,\n  `Notifications: ${config.notify.allowedByConfig ? 'ARMED (' + channels.join(', ') + ')' : 'BLOCKED'}`,\n  `HubSpot SLA stamp: ${config.hubspot.stampAllowed ? 'ARMED' : 'BLOCKED'}`,\n];\nreturn [{ json: { config, safetyDecisions } }];\n"
+      },
+      "id": "3c0c0aa6-b377-4b36-a0ef-c8ba54cb6b2b",
+      "name": "Config & Safety Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        120
+      ],
+      "notes": "Env-only config, fail-safe flags, window, SLA budgets + clock, webhook auth, notification allowlist."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "2a2cecad-fd10-43f7-a7af-ba4f4ee2acce",
+              "leftValue": "={{ $('Config & Safety Gate').first().json.config.sandboxMode }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "37aa60ad-9de4-4b77-a830-d93b4119be61",
+      "name": "Sandbox Mode?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        20,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Load Synthetic Latency Fixture  (SANDBOX_MODE=true path - ZERO network calls)\n// Embedded object = sample-payloads/latency-fixture.json (verified by the\n// simulator). Records carry IDs, owner IDs, lead source and timestamps only.\n// ============================================================================\nconst FIXTURE = {\n  \"_meta\": {\n    \"synthetic\": true,\n    \"fixtureVersion\": \"1.0.0\",\n    \"description\": \"Fully synthetic HubSpot contact timing records for offline speed-to-lead profiling. Records carry only record IDs, owner IDs, lead source and timestamps: no names, emails or phone numbers. Owners are fictional (example.com).\",\n    \"placeholderPortalId\": \"99000001\",\n    \"asOf\": \"2026-11-16T10:00:00Z (Monday)\",\n    \"window\": \"168 h (2026-11-09T10:00Z to 2026-11-16T10:00Z)\",\n    \"scenarios\": {\n      \"990060001\": \"MET: fast routing, 8m50s\",\n      \"990060002\": \"MET: 11m\",\n      \"990060003\": \"BREACHED: enrichment took 38m\",\n      \"990060004\": \"BREACHED: enrichment took 22m\",\n      \"990060005\": \"BREACHED: webhook ingest took 28m\",\n      \"990060006\": \"BREACHED: owner assignment took 45m\",\n      \"990060007\": \"OPEN_BREACHED: unassigned for ~3h\",\n      \"990060008\": \"OPEN_WITHIN_SLA: in flight, 8m old\",\n      \"990060009\": \"OPEN_BREACHED: assigned, never dialled\",\n      \"990060010\": \"BREACHED: first dial after 2h\",\n      \"990060011\": \"Weekend: BREACHED on wall clock, MET on business clock\",\n      \"990060012\": \"MET: enrichment skipped (hops merged)\",\n      \"990060013\": \"MET: 30s clock skew within tolerance\",\n      \"990060014\": \"DATA_ANOMALY: owner assigned 2h before form submit\",\n      \"990060015\": \"DATA_ANOMALY: invalid timestamp\",\n      \"990060016\": \"OUT_OF_WINDOW: ignored defensively\",\n      \"990060017\": \"DATA_ANOMALY: missing form-submit timestamp\",\n      \"990060018\": \"MET: 6m\",\n      \"990060019\": \"MET: 12m\",\n      \"990060020\": \"MET: 9m (Sunday)\"\n    }\n  },\n  \"portalId\": \"99000001\",\n  \"owners\": [\n    {\n      \"id\": \"99100001\",\n      \"firstName\": \"Avery\",\n      \"lastName\": \"Rep (Mock)\",\n      \"email\": \"avery.rep@example.com\"\n    },\n    {\n      \"id\": \"99100002\",\n      \"firstName\": \"Jordan\",\n      \"lastName\": \"Rep (Mock)\",\n      \"email\": \"jordan.rep@example.com\"\n    },\n    {\n      \"id\": \"99100003\",\n      \"firstName\": \"Riley\",\n      \"lastName\": \"Rep (Mock)\",\n      \"email\": \"riley.rep@example.com\"\n    },\n    {\n      \"id\": \"99100004\",\n      \"firstName\": \"Morgan\",\n      \"lastName\": \"Rep (Mock)\",\n      \"email\": \"morgan.rep@example.com\"\n    }\n  ],\n  \"contacts\": [\n    {\n      \"id\": \"990060001\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-10T14:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-10T14:00:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-10T14:01:50.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-10T14:02:50.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-10T14:08:50.000Z\",\n        \"hubspot_owner_id\": \"99100001\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060002\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-11T09:30:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-11T09:30:15.000Z\",\n        \"lead_enriched_at\": \"2026-11-11T09:31:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-11T09:32:00.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-11T09:41:00.000Z\",\n        \"hubspot_owner_id\": \"99100002\",\n        \"hs_analytics_source\": \"ORGANIC_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060003\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-11T16:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-11T16:00:30.000Z\",\n        \"lead_enriched_at\": \"2026-11-11T16:38:30.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-11T16:39:30.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-11T16:50:30.000Z\",\n        \"hubspot_owner_id\": \"99100003\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060004\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-12T10:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-12T10:00:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-12T10:22:20.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-12T10:24:20.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-12T10:36:20.000Z\",\n        \"hubspot_owner_id\": \"99100001\",\n        \"hs_analytics_source\": \"REFERRALS\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060005\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-12T13:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-12T13:28:00.000Z\",\n        \"lead_enriched_at\": \"2026-11-12T13:29:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-12T13:30:00.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-12T13:40:00.000Z\",\n        \"hubspot_owner_id\": \"99100002\",\n        \"hs_analytics_source\": \"DIRECT_TRAFFIC\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060006\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-12T15:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-12T15:00:10.000Z\",\n        \"lead_enriched_at\": \"2026-11-12T15:01:10.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-12T15:46:10.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-12T15:55:10.000Z\",\n        \"hubspot_owner_id\": \"99100004\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060007\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-16T07:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-16T07:00:30.000Z\",\n        \"lead_enriched_at\": \"2026-11-16T07:02:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"\",\n        \"hs_sa_first_engagement_date\": \"\",\n        \"hubspot_owner_id\": \"\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060008\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-16T09:52:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-16T09:52:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-16T09:56:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"\",\n        \"hs_sa_first_engagement_date\": \"\",\n        \"hubspot_owner_id\": \"\",\n        \"hs_analytics_source\": \"ORGANIC_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060009\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-15T15:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-15T15:00:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-15T15:01:20.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-15T15:03:20.000Z\",\n        \"hs_sa_first_engagement_date\": \"\",\n        \"hubspot_owner_id\": \"99100003\",\n        \"hs_analytics_source\": \"REFERRALS\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060010\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-13T11:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-13T11:00:15.000Z\",\n        \"lead_enriched_at\": \"2026-11-13T11:01:15.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-13T11:02:15.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-13T13:02:15.000Z\",\n        \"hubspot_owner_id\": \"99100004\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060011\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-14T21:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-14T21:00:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-14T21:01:20.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-14T21:02:20.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-16T09:10:00.000Z\",\n        \"hubspot_owner_id\": \"99100002\",\n        \"hs_analytics_source\": \"ORGANIC_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060012\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-13T14:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-13T14:00:30.000Z\",\n        \"lead_enriched_at\": \"\",\n        \"hubspot_owner_assigneddate\": \"2026-11-13T14:03:30.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-13T14:12:30.000Z\",\n        \"hubspot_owner_id\": \"99100001\",\n        \"hs_analytics_source\": \"DIRECT_TRAFFIC\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060013\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-13T15:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-13T15:01:00.000Z\",\n        \"lead_enriched_at\": \"2026-11-13T15:00:30.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-13T15:02:00.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-13T15:10:00.000Z\",\n        \"hubspot_owner_id\": \"99100003\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060014\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-14T10:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-14T10:00:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-14T10:01:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-14T08:00:00.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-14T10:20:00.000Z\",\n        \"hubspot_owner_id\": \"99100004\",\n        \"hs_analytics_source\": \"REFERRALS\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060015\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-14T11:00:00.000Z\",\n        \"lead_ingested_at\": \"not-a-date\",\n        \"lead_enriched_at\": \"2026-11-14T11:02:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-14T11:03:00.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-14T11:10:00.000Z\",\n        \"hubspot_owner_id\": \"99100001\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060016\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-02T10:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-02T10:00:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-02T10:01:20.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-02T10:02:20.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-02T10:12:20.000Z\",\n        \"hubspot_owner_id\": \"99100002\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060017\",\n      \"properties\": {\n        \"first_conversion_date\": \"\",\n        \"lead_ingested_at\": \"2026-11-14T12:00:20.000Z\",\n        \"lead_enriched_at\": \"2026-11-14T12:01:20.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-14T12:02:20.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-14T12:12:20.000Z\",\n        \"hubspot_owner_id\": \"99100003\",\n        \"hs_analytics_source\": \"ORGANIC_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060018\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-10T10:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-10T10:00:10.000Z\",\n        \"lead_enriched_at\": \"2026-11-10T10:01:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-10T10:01:40.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-10T10:06:00.000Z\",\n        \"hubspot_owner_id\": \"99100001\",\n        \"hs_analytics_source\": \"PAID_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060019\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-13T09:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-13T09:00:30.000Z\",\n        \"lead_enriched_at\": \"2026-11-13T09:02:00.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-13T09:04:00.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-13T09:12:00.000Z\",\n        \"hubspot_owner_id\": \"99100003\",\n        \"hs_analytics_source\": \"REFERRALS\",\n        \"lifecyclestage\": \"lead\"\n      }\n    },\n    {\n      \"id\": \"990060020\",\n      \"properties\": {\n        \"first_conversion_date\": \"2026-11-15T11:00:00.000Z\",\n        \"lead_ingested_at\": \"2026-11-15T11:00:15.000Z\",\n        \"lead_enriched_at\": \"2026-11-15T11:01:15.000Z\",\n        \"hubspot_owner_assigneddate\": \"2026-11-15T11:02:15.000Z\",\n        \"hs_sa_first_engagement_date\": \"2026-11-15T11:09:00.000Z\",\n        \"hubspot_owner_id\": \"99100004\",\n        \"hs_analytics_source\": \"ORGANIC_SEARCH\",\n        \"lifecyclestage\": \"lead\"\n      }\n    }\n  ],\n  \"previousSnapshot\": {\n    \"windowEnd\": \"2026-11-09T10:00:00.000Z\",\n    \"adherencePct\": \"70.0\",\n    \"breaches\": 4,\n    \"openBreaches\": 1,\n    \"p90TotalSec\": 2400,\n    \"topRootCause\": \"ASSIGNMENT_DELAY\"\n  }\n};\n\nreturn [{\n  json: {\n    source: 'synthetic-fixture',\n    complete: true,\n    contacts: FIXTURE.contacts,\n    owners: FIXTURE.owners,\n    ownersLookup: 'ok',\n    previousSnapshot: FIXTURE.previousSnapshot,\n    collectionWarnings: [],\n  },\n}];\n"
+      },
+      "id": "5bbb191e-fc1f-4fea-a7a4-1b773b43bf7f",
+      "name": "Load Synthetic Latency Fixture",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Build Lead Search  (LIVE path)\n// Read-only contact search: form submitted inside the analysis window.\n// Requests timing, owner and source properties ONLY. No names, emails or\n// phone numbers are ever fetched (data minimisation).\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst P = config.hubspot.props;\nconst filters = [\n  { propertyName: P.submit, operator: 'GTE', value: String(config.window.startMs) },\n  { propertyName: P.submit, operator: 'LT', value: String(config.window.endMs) },\n];\nif (config.sla.lifecycleStages.length) filters.push({ propertyName: 'lifecyclestage', operator: 'IN', values: config.sla.lifecycleStages });\nconst properties = [...new Set([P.submit, P.ingest, P.enrich, P.assign, P.dial, P.owner, P.source, 'lifecyclestage', P.stampStatus, P.stampRootCause, P.stampMinutes].filter(Boolean))];\nreturn [{ json: {\n  url: `${config.hubspot.apiBase}/crm/v3/objects/contacts/search`,\n  body: { filterGroups: [{ filters }], properties, sorts: [{ propertyName: 'hs_object_id', direction: 'ASCENDING' }], limit: config.hubspot.pageSize },\n} }];\n"
+      },
+      "id": "3893f0ba-06e7-46ec-a80d-196a9010bd5f",
+      "name": "Build Lead Search",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "body",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.next ? $response.body.paging.next.after : undefined }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next || !$response.body.paging.next.after }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 300
+            }
+          }
+        }
+      },
+      "id": "ab6098d7-c68b-4521-aa43-3eaf8a517594",
+      "name": "HubSpot: Search Leads in Window",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "Read-only contact search (timestamps, owner, source only). Stops the run on failure."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Collect Lead Pages  (LIVE path) - FAIL CLOSED\n// A failed page, > 10,000 matches (HubSpot search ceiling) or truncated\n// pagination aborts the run: SLA adherence from partial data would mislead.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst pages = $input.all().map((i) => i.json);\nconst failed = pages.find((p) => p && p.error);\nif (failed) throw new Error('HubSpot contact search failed; aborting (no partial SLA report): ' + String(failed.error.message || failed.error).slice(0, 300));\nconst total = pages.length && typeof pages[0].total === 'number' ? pages[0].total : null;\nif (total !== null && total >= 10000) throw new Error(`HubSpot contact search matched ${total} leads; the search API cannot page past 10,000. Shorten WINDOW_HOURS or set LIFECYCLE_STAGES.`);\nconst last = pages[pages.length - 1] || {};\nif (pages.length >= config.hubspot.maxSearchPages && last.paging && last.paging.next) throw new Error(`Contact search pagination stopped at ${pages.length} pages with more results pending; aborting.`);\nconst seen = new Map();\nfor (const p of pages) for (const r of p.results || []) if (r && r.id && !seen.has(String(r.id))) seen.set(String(r.id), r);\nreturn [{ json: { contacts: [...seen.values()], pages: pages.length, ownersUrl: `${config.hubspot.apiBase}/crm/v3/owners?limit=100&archived=false` } }];\n"
+      },
+      "id": "83358928-ce19-4096-a2e9-9780f7e45ae6",
+      "name": "Collect Lead Pages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ],
+      "notes": "Fail closed on errors, >10k results or truncated pagination."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.ownersUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.next ? $response.body.paging.next.after : undefined }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next || !$response.body.paging.next.after }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 300
+            }
+          }
+        }
+      },
+      "id": "1527d22d-55a7-478e-a5c7-01643e5bd88b",
+      "name": "HubSpot: Fetch Owners",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        920,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Optional owner display names; failure falls back to owner IDs."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Normalize Lead Records\n// Unifies the sandbox fixture and the live search. Owner names are optional\n// (labels fall back to owner IDs). The previous snapshot comes from the\n// fixture (sandbox) or workflow static data (live).\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst first = $input.first().json || {};\nif (first.source === 'synthetic-fixture') return [{ json: { ...first } }];\nconst warnings = [];\nconst contacts = $('Collect Lead Pages').first().json.contacts;\nconst ownerPages = $input.all().map((i) => i.json);\nlet owners = [];\nlet ownersLookup = 'ok';\nif (ownerPages.some((p) => p.error)) {\n  ownersLookup = 'failed';\n  warnings.push('Owners could not be read (needs crm.objects.owners.read); owners are labelled by ID.');\n} else {\n  for (const p of ownerPages) for (const o of p.results || []) owners.push({ id: String(o.id), firstName: o.firstName || '', lastName: o.lastName || '' });\n}\nlet previousSnapshot = null;\ntry { const sd = $getWorkflowStaticData('global'); previousSnapshot = sd.lastSnapshot || null; } catch (e) { previousSnapshot = null; }\nreturn [{ json: { source: 'hubspot-api', complete: true, contacts, owners, ownersLookup, previousSnapshot, collectionWarnings: warnings } }];\n"
+      },
+      "id": "27173bf8-9290-4f33-ac59-c37887ced1b7",
+      "name": "Normalize Lead Records",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Latency Profiler  (pure computation, no network)\n// Per lead, the chain  submit → ingest → enrich → assign → first dial :\n//   * parses and validates every timestamp (invalid, future, missing submit)\n//   * enforces ordering with a clock-skew tolerance (small negatives -> 0 + flag)\n//   * merges a missing intermediate stage into the next present hop (budgets add)\n//   * measures each hop on the wall clock or the business-hours clock\n//   * for leads still in flight, measures the running hop up to the as-of time\n//   * classifies MET / BREACHED / OPEN_WITHIN_SLA / OPEN_BREACHED / DATA_ANOMALY\n//   * picks the ROOT CAUSE = hop with the largest overrun over its budget\n// Then aggregates per hop (p50 / p90 / p95 / mean / max, over-budget rate),\n// root-cause distribution, bottleneck hop, per-owner and per-source views,\n// week-over-week trend and data-quality guards.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst input = $input.first().json;\nconst S = config.sla;\nconst P = config.hubspot.props;\nconst DAY = 86400000;\nconst asOf = config.window.endMs;\nconst skewMs = S.skewToleranceSec * 1000;\n\n// ---------------------------------------------------------------- time\nfunction parseInstant(raw) {\n  const s = String(raw ?? '').trim();\n  if (!s) return { empty: true };\n  let ms = NaN;\n  if (/^\\d{12,14}$/.test(s)) ms = Number(s);\n  else if (/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}/.test(s)) ms = Date.parse(s);\n  else if (/^\\d{4}-\\d{2}-\\d{2}$/.test(s)) ms = Date.parse(s + 'T00:00:00Z');\n  if (!Number.isFinite(ms) || ms < Date.UTC(2000, 0, 1) || ms > Date.UTC(2100, 0, 1)) return { invalid: true };\n  return { ms };\n}\nconst B = S.business;\nconst holidaySet = new Set(B.holidays);\n/** Seconds between a and b (a <= b) on the configured SLA clock. */\nfunction clockSec(a, b) {\n  if (b <= a) return 0;\n  if (S.clock === 'wall') return Math.round((b - a) / 1000);\n  const off = B.utcOffsetMin * 60000;\n  const la = a + off, lb = b + off;\n  let total = 0;\n  const d0 = Math.floor(la / DAY), d1 = Math.floor(lb / DAY);\n  if (d1 - d0 > 400) throw new Error('Business-hours span exceeds 400 days; check timestamps.');\n  for (let d = d0; d <= d1; d++) {\n    const dayStart = d * DAY;\n    const wd = new Date(dayStart).getUTCDay();\n    if (!B.days.includes(wd) || holidaySet.has(new Date(dayStart).toISOString().slice(0, 10))) continue;\n    const s = Math.max(la, dayStart + B.openMin * 60000);\n    const e = Math.min(lb, dayStart + B.closeMin * 60000);\n    if (e > s) total += e - s;\n  }\n  return Math.round(total / 1000);\n}\n\n// ---------------------------------------------------------------- leads\nconst STAGES = ['submit', 'ingest', 'enrich', 'assign', 'dial'];\nconst HOPS = S.hops; // hop i connects STAGES[i] -> STAGES[i+1]\nconst RUNNING_CATEGORY = { ingest: 'INGEST_STALLED', enrich: 'ENRICHMENT_STALLED', assign: 'UNASSIGNED_BOTTLENECK', dial: 'MISSED_FIRST_DIAL' };\nconst totalBudgetSec = Math.round(S.totalMin * 60);\nconst leads = [];\nlet outOfWindow = 0;\n\nfor (const c of input.contacts || []) {\n  const p = c.properties || {};\n  const id = String(c.id);\n  const lead = { id, ownerId: /^\\d{1,20}$/.test(String(p[P.owner] || '')) ? String(p[P.owner]) : null, source: String(p[P.source] || 'UNKNOWN').slice(0, 40), flags: [], segments: [], status: null, rootCause: null, totalSec: null, existing: { status: p[P.stampStatus] || '', rootCause: p[P.stampRootCause] || '', minutes: p[P.stampMinutes] || '' } };\n  const anomaly = (code, detail) => { lead.status = 'DATA_ANOMALY'; lead.rootCause = 'DATA_ANOMALY'; lead.anomaly = code; if (detail) lead.anomalyDetail = detail; leads.push(lead); };\n\n  const ts = {};\n  let bad = null;\n  for (const st of STAGES) {\n    const r = parseInstant(p[P[st]]);\n    if (r.invalid) { bad = bad || `${st}: \"${String(p[P[st]]).slice(0, 30)}\"`; ts[st] = null; }\n    else ts[st] = r.empty ? null : r.ms;\n  }\n  // Window first: a lead submitted outside the window is ignored, whatever its\n  // other timestamps look like, so it can never inflate the anomaly rate.\n  const submitParsed = parseInstant(p[P.submit]);\n  if (submitParsed.ms !== undefined && (submitParsed.ms < config.window.startMs || submitParsed.ms >= config.window.endMs)) { outOfWindow++; continue; }\n  if (submitParsed.empty) { anomaly('MISSING_SUBMIT_TIMESTAMP'); continue; }\n  if (bad) { anomaly('INVALID_TIMESTAMP', bad); continue; }\n  const future = STAGES.find((st) => ts[st] !== null && ts[st] > asOf + skewMs);\n  if (future) { anomaly('FUTURE_TIMESTAMP', future); continue; }\n\n  // Ordering with skew tolerance.\n  let prevIdx = 0;\n  let order = null;\n  const present = [0];\n  for (let i = 1; i < STAGES.length; i++) {\n    if (ts[STAGES[i]] === null) continue;\n    const delta = ts[STAGES[i]] - ts[STAGES[prevIdx]];\n    if (delta < -skewMs) { order = `${STAGES[i]} is ${Math.round(-delta / 1000)}s before ${STAGES[prevIdx]}`; break; }\n    if (delta < 0) { ts[STAGES[i]] = ts[STAGES[prevIdx]]; if (!lead.flags.includes('CLOCK_SKEW')) lead.flags.push('CLOCK_SKEW'); }\n    present.push(i);\n    prevIdx = i;\n  }\n  if (order) { anomaly('NON_MONOTONIC_TIMESTAMPS', order); continue; }\n\n  // Completed segments between consecutive present stages (missing stages merge).\n  for (let k = 1; k < present.length; k++) {\n    const a = present[k - 1], b = present[k];\n    const covered = HOPS.slice(a, b);\n    if (b - a > 1) for (let m = a + 1; m < b; m++) lead.flags.push(`${STAGES[m].toUpperCase()}_MISSING`);\n    lead.segments.push({\n      key: covered.map((h) => h.key).join('+'),\n      hops: covered.map((h) => h.key),\n      sec: clockSec(ts[STAGES[a]], ts[STAGES[b]]),\n      budgetSec: Math.round(covered.reduce((s, h) => s + h.budgetMin, 0) * 60),\n      category: covered[covered.length - 1].category,\n      merged: covered.length > 1,\n      running: false,\n    });\n  }\n  // Running segment for leads not yet dialled.\n  const lastIdx = present[present.length - 1];\n  if (lastIdx < 4) {\n    let next = lastIdx + 1;\n    const coveredIdx = [lastIdx];\n    // Enrichment is optional: a lead past ingest with no enrichment is waiting for an owner.\n    if (STAGES[next] === 'enrich' && S.enrichmentOptional !== false) { coveredIdx.push(next); next++; }\n    const covered = HOPS.slice(lastIdx, next);\n    lead.segments.push({\n      key: covered.map((h) => h.key).join('+'),\n      hops: covered.map((h) => h.key),\n      sec: clockSec(ts[STAGES[lastIdx]], asOf),\n      budgetSec: Math.round(covered.reduce((s, h) => s + h.budgetMin, 0) * 60),\n      category: RUNNING_CATEGORY[STAGES[next]],\n      merged: covered.length > 1,\n      running: true,\n    });\n  }\n\n  const totalSec = clockSec(ts.submit, lastIdx === 4 ? ts.dial : asOf);\n  lead.totalSec = totalSec;\n  lead.submitIso = new Date(ts.submit).toISOString();\n  const open = lastIdx < 4;\n  const breached = totalSec > totalBudgetSec;\n  lead.status = open ? (breached ? 'OPEN_BREACHED' : 'OPEN_WITHIN_SLA') : breached ? 'BREACHED' : 'MET';\n  for (const s of lead.segments) s.overrunSec = s.sec - s.budgetSec;\n  if (lead.segments.some((s) => s.overrunSec > 0 && !s.running)) lead.flags.push('HOP_OVER_BUDGET');\n  if (breached) {\n    const worst = [...lead.segments].sort((x, y) => y.overrunSec - x.overrunSec || HOPS.findIndex((h) => h.key === x.hops[0]) - HOPS.findIndex((h) => h.key === y.hops[0]))[0];\n    lead.rootCause = worst && worst.overrunSec > 0 ? worst.category : 'CUMULATIVE_DRIFT';\n    lead.rootSegment = worst ? worst.key : null;\n  }\n  leads.push(lead);\n}\n\n// ---------------------------------------------------------------- stats\nconst pct = (sorted, q) => (sorted.length ? sorted[Math.max(0, Math.ceil(q * sorted.length) - 1)] : null);\nfunction stats(values) {\n  const v = [...values].sort((a, b) => a - b);\n  return { n: v.length, p50: pct(v, 0.5), p90: pct(v, 0.9), p95: pct(v, 0.95), max: v.length ? v[v.length - 1] : null, mean: v.length ? Math.round(v.reduce((s, x) => s + x, 0) / v.length) : null };\n}\nconst analyzable = leads.filter((l) => l.status !== 'DATA_ANOMALY');\nconst anomalies = leads.filter((l) => l.status === 'DATA_ANOMALY');\nconst count = (st) => analyzable.filter((l) => l.status === st).length;\nconst met = count('MET'), breachedN = count('BREACHED'), openBreached = count('OPEN_BREACHED'), openWithin = count('OPEN_WITHIN_SLA');\nconst decided = met + breachedN + openBreached;\nconst adherencePct = decided ? ((met * 100) / decided).toFixed(1) : null;\n\nconst hopStats = HOPS.map((h) => {\n  const segs = analyzable.flatMap((l) => l.segments).filter((s) => !s.merged && s.hops[0] === h.key);\n  const done = segs.filter((s) => !s.running);\n  const st = stats(done.map((s) => s.sec));\n  const budgetSec = Math.round(h.budgetMin * 60);\n  const overDone = done.filter((s) => s.sec > budgetSec).length;\n  const runningOver = segs.filter((s) => s.running && s.sec > budgetSec).length;\n  const overrunSec = segs.reduce((sum, s) => sum + Math.max(0, s.sec - budgetSec), 0);\n  return { key: h.key, short: h.short, label: h.label, budgetSec, ...st, overBudget: overDone, overBudgetPct: done.length ? ((overDone * 100) / done.length).toFixed(1) : null, runningOverBudget: runningOver, totalOverrunSec: overrunSec, p90VsBudget: st.p90 !== null ? (st.p90 / budgetSec).toFixed(2) : null };\n});\nconst mergedSegments = analyzable.flatMap((l) => l.segments).filter((s) => s.merged).length;\nconst completed = analyzable.filter((l) => l.status === 'MET' || l.status === 'BREACHED');\nconst totalStats = stats(completed.map((l) => l.totalSec));\n\nconst rootCauses = {};\nfor (const l of analyzable) if (l.rootCause) rootCauses[l.rootCause] = (rootCauses[l.rootCause] || 0) + 1;\nconst breachTotal = breachedN + openBreached;\nconst rootCauseRanking = Object.entries(rootCauses).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([cause, n]) => ({ cause, count: n, sharePct: ((n * 100) / Math.max(1, breachTotal)).toFixed(1) }));\nconst HOP_OF = { INGEST_DELAY: 'ingest', INGEST_STALLED: 'ingest', ENRICHMENT_DELAY: 'enrich', ENRICHMENT_STALLED: 'enrich', ASSIGNMENT_DELAY: 'assign', UNASSIGNED_BOTTLENECK: 'assign', FIRST_DIAL_DELAY: 'dial', MISSED_FIRST_DIAL: 'dial' };\nconst byHopCause = {};\nfor (const [cause, n] of Object.entries(rootCauses)) if (HOP_OF[cause]) byHopCause[HOP_OF[cause]] = (byHopCause[HOP_OF[cause]] || 0) + n;\nconst bottleneckKey = Object.entries(byHopCause).sort((a, b) => b[1] - a[1] || (hopStats.find((h) => h.key === b[0]).totalOverrunSec - hopStats.find((h) => h.key === a[0]).totalOverrunSec))[0];\nconst bottleneck = bottleneckKey ? { hop: bottleneckKey[0], label: HOPS.find((h) => h.key === bottleneckKey[0]).label, breaches: bottleneckKey[1], sharePct: ((bottleneckKey[1] * 100) / Math.max(1, breachTotal)).toFixed(1), totalOverrunSec: hopStats.find((h) => h.key === bottleneckKey[0]).totalOverrunSec } : null;\n\n// Owners: assignment -> dial latency and dial-side breaches.\nconst ownerNames = Object.fromEntries((input.owners || []).map((o) => [String(o.id), [o.firstName, o.lastName].filter(Boolean).join(' ').trim()]));\nconst ownerLabel = (id) => (config.display.repLabel === 'name' && ownerNames[id] ? ownerNames[id] : `Owner ${id}`);\nconst owners = {};\nfor (const l of analyzable) {\n  if (!l.ownerId) continue;\n  const o = (owners[l.ownerId] = owners[l.ownerId] || { ownerId: l.ownerId, leads: 0, dialSecs: [], dialBreaches: 0, openMissedDial: 0, breaches: 0 });\n  o.leads++;\n  const dialSeg = l.segments.find((s) => s.hops[s.hops.length - 1] === 'dial' && !s.running);\n  if (dialSeg) o.dialSecs.push(dialSeg.sec);\n  if (l.rootCause === 'FIRST_DIAL_DELAY') o.dialBreaches++;\n  if (l.rootCause === 'MISSED_FIRST_DIAL') o.openMissedDial++;\n  if (l.status === 'BREACHED' || l.status === 'OPEN_BREACHED') o.breaches++;\n}\nconst ownerRows = Object.values(owners).map((o) => ({ ownerId: o.ownerId, label: ownerLabel(o.ownerId), leads: o.leads, breaches: o.breaches, dialBreaches: o.dialBreaches, openMissedDial: o.openMissedDial, dialP50Sec: stats(o.dialSecs).p50 }))\n  .sort((a, b) => (b.dialBreaches + b.openMissedDial) - (a.dialBreaches + a.openMissedDial) || b.breaches - a.breaches || (b.dialP50Sec || 0) - (a.dialP50Sec || 0) || a.ownerId.localeCompare(b.ownerId));\nconst sources = {};\nfor (const l of analyzable) {\n  const s = (sources[l.source] = sources[l.source] || { source: l.source, leads: 0, met: 0, decided: 0 });\n  s.leads++;\n  if (['MET', 'BREACHED', 'OPEN_BREACHED'].includes(l.status)) s.decided++;\n  if (l.status === 'MET') s.met++;\n}\nconst sourceRows = Object.values(sources).map((s) => ({ ...s, adherencePct: s.decided ? ((s.met * 100) / s.decided).toFixed(1) : null })).sort((a, b) => b.leads - a.leads || a.source.localeCompare(b.source));\nconst openBreachList = analyzable.filter((l) => l.status === 'OPEN_BREACHED').sort((a, b) => b.totalSec - a.totalSec)\n  .map((l) => ({ id: l.id, ageSec: l.totalSec, rootCause: l.rootCause, ownerId: l.ownerId, ownerLabel: l.ownerId ? ownerLabel(l.ownerId) : 'Unassigned', url: `${config.hubspot.appBase}/contacts/${config.portalId}/record/0-1/${l.id}` }));\n\n// ---------------------------------------------------------------- trend & guards\nconst prev = input.previousSnapshot && input.previousSnapshot.windowEnd < config.window.asOfIso ? input.previousSnapshot : null;\nconst topRootCause = rootCauseRanking.length ? rootCauseRanking[0].cause : null;\nconst trend = prev ? {\n  previousWindowEnd: prev.windowEnd,\n  adherencePts: adherencePct !== null && prev.adherencePct !== null ? (Number(adherencePct) - Number(prev.adherencePct)).toFixed(1) : null,\n  breaches: breachTotal - ((prev.breaches || 0) + (prev.openBreaches || 0)),\n  p90TotalSec: totalStats.p90 !== null && prev.p90TotalSec !== undefined ? totalStats.p90 - prev.p90TotalSec : null,\n  topRootCauseChanged: prev.topRootCause !== topRootCause,\n  previousTopRootCause: prev.topRootCause || null,\n} : null;\nconst inWindow = leads.length;\nconst anomalyPct = inWindow ? (anomalies.length * 100) / inWindow : 0;\nconst guardFailures = [];\nif (anomalyPct > config.guards.maxAnomalyPct) guardFailures.push(`${anomalies.length}/${inWindow} leads (${anomalyPct.toFixed(1)}%) have timestamp anomalies, above MAX_ANOMALY_PCT ${config.guards.maxAnomalyPct}%`);\nif (analyzable.length < config.guards.minLeads) guardFailures.push(`Only ${analyzable.length} analysable lead(s) in the window (MIN_LEADS_TO_POST=${config.guards.minLeads})`);\nif (!input.complete) guardFailures.push('Data collection was incomplete');\nif (config.configErrors.length) guardFailures.push(...config.configErrors.map((e) => `Config: ${e}`));\nconst snapshot = { windowEnd: config.window.asOfIso, adherencePct, breaches: breachedN, openBreaches: openBreached, p90TotalSec: totalStats.p90, topRootCause };\n\nreturn [{\n  json: {\n    window: config.window,\n    sla: { totalSec: totalBudgetSec, clock: S.clock, hops: HOPS.map((h) => ({ key: h.key, label: h.label, budgetSec: Math.round(h.budgetMin * 60) })) },\n    source: input.source,\n    counts: { inWindow, analyzable: analyzable.length, met, breached: breachedN, openBreached, openWithinSla: openWithin, anomalies: anomalies.length, outOfWindowIgnored: outOfWindow, mergedSegments },\n    adherencePct,\n    totalStats,\n    hopStats,\n    rootCauseRanking,\n    bottleneck,\n    owners: ownerRows,\n    sources: sourceRows,\n    openBreaches: openBreachList,\n    anomalies: anomalies.map((l) => ({ id: l.id, code: l.anomaly, detail: l.anomalyDetail || null })),\n    leads,\n    trend,\n    snapshot,\n    dataQuality: { anomalyPct: anomalyPct.toFixed(1), ownersLookup: input.ownersLookup, clockSkewFlags: analyzable.filter((l) => l.flags.includes('CLOCK_SKEW')).length, mergedSegments },\n    guards: { passed: guardFailures.length === 0, failures: guardFailures },\n    collectionWarnings: input.collectionWarnings || [],\n  },\n}];\n"
+      },
+      "id": "7311fa83-0969-480f-ad1d-ef44e972881b",
+      "name": "Latency Profiler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        120
+      ],
+      "notes": "Timestamp validation, hop latency (wall / business clock), SLA status, root cause, percentiles, bottleneck, guards."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Notification Builder\n// Slack Block Kit message + Microsoft Teams Adaptive Card 1.4 (wrapped for the\n// Teams Workflows webhook). Leads are referenced by record ID / link only;\n// no names, emails or phone numbers. CRM-sourced labels are escaped.\n// Also applies the duplicate-post guard (same window end already posted).\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst c = $input.first().json;\n\nconst dur = (sec) => {\n  if (sec === null || sec === undefined) return 'n/a';\n  const neg = sec < 0; let s = Math.abs(Math.round(sec));\n  let out;\n  if (s < 60) out = `${s}s`;\n  else if (s < 3600) out = `${(s / 60).toFixed(1)}m`;\n  else if (s < 86400) out = `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;\n  else out = `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;\n  return (neg ? '-' : '') + out;\n};\nconst escSlack = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[*_~`]/g, '');\nconst escTeams = (s) => String(s ?? '').replace(/[[\\]()<>*_~`#]/g, '');\nconst clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);\nconst CAUSE = {\n  INGEST_DELAY: 'Webhook ingest delay', INGEST_STALLED: 'Ingest stalled (open)', ENRICHMENT_DELAY: 'Enrichment delay', ENRICHMENT_STALLED: 'Enrichment stalled (open)',\n  ASSIGNMENT_DELAY: 'Owner assignment delay', UNASSIGNED_BOTTLENECK: 'Unassigned bottleneck (open)', FIRST_DIAL_DELAY: 'Late first dial', MISSED_FIRST_DIAL: 'Missed first dial (open)',\n  CUMULATIVE_DRIFT: 'Cumulative drift (no single hop over budget)',\n};\nconst sandboxTag = c.source === 'synthetic-fixture' ? ' [SANDBOX]' : '';\nconst title = `${config.display.title}${sandboxTag}`;\nconst adh = c.adherencePct === null ? 'n/a' : `${c.adherencePct}%`;\nconst n = c.counts;\nconst windowLine = `${c.window.startIso.slice(0, 16).replace('T', ' ')} → ${c.window.asOfIso.slice(0, 16).replace('T', ' ')} UTC (${c.window.hours} h) · SLA ${dur(c.sla.totalSec)} submit → first dial · ${c.sla.clock === 'business' ? 'business-hours clock' : 'wall clock'}`;\nconst trendLine = c.trend ? `vs ${c.trend.previousWindowEnd.slice(0, 10)}: adherence ${Number(c.trend.adherencePts) >= 0 ? '+' : ''}${c.trend.adherencePts} pts · breaches ${c.trend.breaches >= 0 ? '+' : ''}${c.trend.breaches} · p90 speed-to-lead ${c.trend.p90TotalSec >= 0 ? '+' : ''}${dur(c.trend.p90TotalSec)}${c.trend.topRootCauseChanged ? ` · top cause changed from ${CAUSE[c.trend.previousTopRootCause] || c.trend.previousTopRootCause}` : ''}` : null;\n\n// Hop table (monospace, fixed width).\nconst pad = (s, w) => (String(s).length >= w ? String(s).slice(0, w) : String(s) + ' '.repeat(w - String(s).length));\nconst hopTable = ['Hop                   p50     p90     budget  over', ...c.hopStats.map((h) => `${pad(h.short.replace('→', '->'), 21)} ${pad(dur(h.p50), 7)} ${pad(dur(h.p90), 7)} ${pad(dur(h.budgetSec), 7)} ${h.overBudgetPct === null ? 'n/a' : h.overBudgetPct + '%'}${h.runningOverBudget ? ` (+${h.runningOverBudget} open)` : ''}`), `${pad('TOTAL submit -> dial', 21)} ${pad(dur(c.totalStats.p50), 7)} ${pad(dur(c.totalStats.p90), 7)} ${pad(dur(c.sla.totalSec), 7)}`].join('\\n');\nconst causeLines = c.rootCauseRanking.length ? c.rootCauseRanking.map((r, i) => `${i + 1}. ${CAUSE[r.cause] || r.cause}: ${r.count} (${r.sharePct}%)`).join('\\n') : 'No breaches in this window.';\nconst bottleneckLine = c.bottleneck ? `:dart: *Bottleneck: ${escSlack(c.bottleneck.label)}* drives ${c.bottleneck.breaches} of ${n.breached + n.openBreached} breaches (${c.bottleneck.sharePct}%), ${dur(c.bottleneck.totalOverrunSec)} total overrun.` : ':white_check_mark: No bottleneck: every lead met the SLA.';\nconst openList = c.openBreaches.slice(0, config.display.maxOpenBreaches);\nconst ownerList = c.owners.filter((o) => o.dialBreaches + o.openMissedDial + o.breaches > 0).slice(0, config.display.maxOwners);\n\n// ---------------------------------------------------------------- Slack\nconst blocks = [\n  { type: 'header', text: { type: 'plain_text', text: clip(title, 150), emoji: true } },\n  { type: 'context', elements: [{ type: 'mrkdwn', text: clip(windowLine, 300) }] },\n  { type: 'section', fields: [\n    { type: 'mrkdwn', text: `*SLA adherence*\\n${adh} (${n.met}/${n.met + n.breached + n.openBreached})` },\n    { type: 'mrkdwn', text: `*Breaches*\\n${n.breached} closed · ${n.openBreached} still open` },\n    { type: 'mrkdwn', text: `*Speed-to-lead p50 / p90*\\n${dur(c.totalStats.p50)} / ${dur(c.totalStats.p90)}` },\n    { type: 'mrkdwn', text: `*Leads in window*\\n${n.inWindow} (${n.openWithinSla} in flight, ${n.anomalies} anomalies)` },\n  ] },\n];\nif (trendLine) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: clip(trendLine, 300) }] });\nblocks.push({ type: 'section', text: { type: 'mrkdwn', text: clip(bottleneckLine, 3000) } });\nblocks.push({ type: 'section', text: { type: 'mrkdwn', text: clip('*Hop latency*\\n```' + hopTable + '```', 3000) } });\nblocks.push({ type: 'section', text: { type: 'mrkdwn', text: clip(`*Breach root causes*\\n${causeLines}`, 3000) } });\nif (openList.length) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: clip(`*Open breaches needing action now*\\n` + openList.map((o) => `• <${o.url}|Contact ${o.id}> · ${dur(o.ageSec)} old · ${CAUSE[o.rootCause] || o.rootCause} · ${escSlack(o.ownerLabel)}`).join('\\n'), 3000) } });\nif (ownerList.length) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: clip(`*Owners with breaches*\\n` + ownerList.map((o) => `• ${escSlack(o.label)}: ${o.breaches} breach(es), ${o.dialBreaches} late dial, ${o.openMissedDial} missed dial open, median assign → dial ${dur(o.dialP50Sec)}`).join('\\n'), 3000) } });\nconst srcLine = c.sources.slice(0, 6).map((s) => `${escSlack(s.source)} ${s.adherencePct === null ? 'n/a' : s.adherencePct + '%'} (${s.leads})`).join(' · ');\nif (srcLine) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: clip(`Adherence by source: ${srcLine}`, 2000) }] });\nconst dq = `Data quality: ${n.anomalies} anomaly(ies) excluded (${c.dataQuality.anomalyPct}%), ${c.dataQuality.clockSkewFlags} clock-skew correction(s), ${c.dataQuality.mergedSegments} merged hop(s) from skipped stages · run ${config.runId}`;\nblocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: clip(dq, 2000) }] });\nif (blocks.length > 50) blocks.splice(49);\nconst slackPayload = { text: clip(`${title}: adherence ${adh}, ${n.breached + n.openBreached} breaches${c.bottleneck ? ', bottleneck ' + c.bottleneck.label : ''}`, 300), blocks, unfurl_links: false };\n\n// ---------------------------------------------------------------- Teams\nconst teamsCard = (opens) => ({\n  type: 'message',\n  attachments: [{\n    contentType: 'application/vnd.microsoft.card.adaptive', contentUrl: null,\n    content: {\n      $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.4', msteams: { width: 'Full' },\n      body: [\n        { type: 'TextBlock', size: 'Large', weight: 'Bolder', wrap: true, text: title },\n        { type: 'TextBlock', isSubtle: true, wrap: true, spacing: 'None', text: windowLine },\n        { type: 'FactSet', facts: [\n          { title: 'SLA adherence', value: `${adh} (${n.met}/${n.met + n.breached + n.openBreached})` },\n          { title: 'Breaches', value: `${n.breached} closed, ${n.openBreached} open` },\n          { title: 'Speed-to-lead p50 / p90', value: `${dur(c.totalStats.p50)} / ${dur(c.totalStats.p90)}` },\n          { title: 'Bottleneck', value: c.bottleneck ? `${c.bottleneck.label} (${c.bottleneck.sharePct}% of breaches)` : 'none' },\n          ...(trendLine ? [{ title: 'Trend', value: trendLine }] : []),\n        ] },\n        { type: 'TextBlock', weight: 'Bolder', separator: true, text: 'Hop latency (p50 / p90 / budget / over budget)' },\n        { type: 'FactSet', facts: c.hopStats.map((h) => ({ title: h.label, value: `${dur(h.p50)} / ${dur(h.p90)} / ${dur(h.budgetSec)} / ${h.overBudgetPct === null ? 'n/a' : h.overBudgetPct + '%'}` })) },\n        { type: 'TextBlock', weight: 'Bolder', separator: true, text: 'Breach root causes' },\n        { type: 'TextBlock', wrap: true, text: causeLines.replace(/\\n/g, '\\n\\n') },\n        ...(opens.length ? [\n          { type: 'TextBlock', weight: 'Bolder', separator: true, color: 'Attention', text: 'Open breaches needing action now' },\n          { type: 'FactSet', facts: opens.map((o) => ({ title: `Contact ${o.id}`, value: `${dur(o.ageSec)} old, ${CAUSE[o.rootCause] || o.rootCause}, ${escTeams(o.ownerLabel)}` })) },\n        ] : []),\n        ...(ownerList.length ? [{ type: 'TextBlock', wrap: true, separator: true, size: 'Small', text: 'Owners with breaches: ' + ownerList.map((o) => `${escTeams(o.label)} (${o.breaches})`).join(', ') }] : []),\n        { type: 'TextBlock', wrap: true, isSubtle: true, size: 'Small', text: dq },\n      ],\n    },\n  }],\n});\nlet opensForTeams = openList;\nlet teamsPayload = teamsCard(opensForTeams);\nwhile (JSON.stringify(teamsPayload).length > 25000 && opensForTeams.length) { opensForTeams = opensForTeams.slice(0, -1); teamsPayload = teamsCard(opensForTeams); }\n\n// ---------------------------------------------------------------- gates\nconst blockers = [...config.notify.blockers, ...c.guards.failures];\nif (blockers.length === 0) {\n  const sd = $getWorkflowStaticData('global');\n  const key = c.window.asOfIso;\n  if (sd.lastPosted && sd.lastPosted[key] && !config.notify.forceRepost) blockers.push(`Already posted for window ending ${key} (set FORCE_REPOST=true to post again)`);\n}\nconst textPreview = [title, windowLine, `Adherence ${adh}; breaches ${n.breached} closed + ${n.openBreached} open; p50/p90 ${dur(c.totalStats.p50)}/${dur(c.totalStats.p90)}`, bottleneckLine.replace(/^:[a-z_]+: /, '').replace(/\\*/g, ''), hopTable, causeLines].join('\\n');\nreturn [{ json: { notifyAllowed: blockers.length === 0, notifyBlockers: blockers, channels: config.notify.channels, slackPayload, teamsPayload, textPreview, sizes: { slackBlocks: blocks.length, teamsChars: JSON.stringify(teamsPayload).length } } }];\n"
+      },
+      "id": "72a0c8d9-527f-456c-abad-e2cb65e87926",
+      "name": "Notification Builder",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        120
+      ],
+      "notes": "Slack Block Kit + Teams Adaptive Card; duplicate-post guard."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "97a4f145-9f55-4f17-a525-90a4c01c0dd1",
+              "leftValue": "={{ $json.notifyAllowed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6f36b022-d731-4fb5-a7e0-0b8584bcc0e2",
+      "name": "Notify Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Dry-Run Preview  (notifications blocked)\n// ============================================================================\nconst b = $input.first().json;\nreturn [{ json: { mode: 'dry-run', notifyBlockedBy: b.notifyBlockers, channels: b.channels, sizes: b.sizes, textPreview: b.textPreview, slackPayload: b.slackPayload, teamsPayload: b.teamsPayload } }];\n"
+      },
+      "id": "cfcd8e13-a397-4ce9-a9d2-9cdd44e04830",
+      "name": "Dry-Run Preview",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Build Notification Requests  (one item per configured channel)\n// The webhook URL is NOT placed in item data; the HTTP node reads it from $env.\n// ============================================================================\nconst b = $input.first().json;\nreturn b.channels.map((channel) => ({ json: { channel, payload: channel === 'teams' ? b.teamsPayload : b.slackPayload } }));\n"
+      },
+      "id": "7c6a3289-1645-410b-a88c-49a8f0c4165d",
+      "name": "Build Notification Requests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.channel === 'teams' ? $env.TEAMS_WEBHOOK_URL : $env.SLACK_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "8fd74cc5-0c70-4667-a641-089ce3d29698",
+      "name": "Post Slack / Teams Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        -60
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Webhook URLs read from $env only. No automatic retry (no duplicate posts)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Notification Result\n// Records the posting (duplicate-post guard) and saves the snapshot used for\n// the trend line, only when every channel accepted the message.\n// ============================================================================\nconst calc = $('Latency Profiler').first().json;\nconst reqs = $('Build Notification Requests').all().map((i) => i.json);\nconst res = $input.all().map((i) => i.json);\nconst results = reqs.map((r, i) => {\n  const x = res[i] || {};\n  const err = x.error ? String(x.error.message || x.error).slice(0, 200) : null;\n  const slackError = r.channel === 'slack' && typeof x.data === 'string' && x.data !== 'ok' ? x.data.slice(0, 100) : null;\n  return { channel: r.channel, ok: !err && !slackError, error: err || slackError };\n});\nconst allOk = results.every((r) => r.ok);\nif (allOk) {\n  const sd = $getWorkflowStaticData('global');\n  sd.lastPosted = sd.lastPosted || {};\n  sd.lastPosted[calc.window.asOfIso] = new Date().toISOString();\n  sd.lastSnapshot = calc.snapshot;\n  for (const k of Object.keys(sd.lastPosted).sort().slice(0, -60)) delete sd.lastPosted[k];\n}\nreturn [{ json: { mode: 'posted', allOk, results } }];\n"
+      },
+      "id": "cc992050-4e96-4195-a714-1baa003430f5",
+      "name": "Notification Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c6a0ee88-a675-476f-a901-ab31b355cfe8",
+              "leftValue": "={{ $('Config & Safety Gate').first().json.config.hubspot.stampAllowed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1ac21b07-87e8-458d-ae04-1608671c9cab",
+      "name": "SLA Stamp Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2680,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Build SLA Stamp Batches  (HUBSPOT_MUTATIONS_ENABLED=true, live, not dry run)\n// The ONLY CRM write: per-contact SLA status, root cause, speed-to-lead minutes\n// and analysed-at. Contacts whose status / cause / minutes are unchanged are\n// skipped. 100 contacts per batch update.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst calc = $('Latency Profiler').first().json;\nconst P = config.hubspot.props;\nconst inputs = [];\nfor (const l of calc.leads) {\n  const minutes = l.totalSec !== null && (l.status === 'MET' || l.status === 'BREACHED') ? (l.totalSec / 60).toFixed(1) : '';\n  const rootCause = l.rootCause || '';\n  if (l.existing.status === l.status && l.existing.rootCause === rootCause && String(l.existing.minutes) === minutes) continue;\n  const properties = { [P.stampStatus]: l.status, [P.stampRootCause]: rootCause };\n  if (P.stampMinutes) properties[P.stampMinutes] = minutes;\n  if (P.stampAnalyzedAt) properties[P.stampAnalyzedAt] = config.now;\n  inputs.push({ id: l.id, properties });\n}\nif (!inputs.length) return [{ json: { skip: true, deals: 0 } }];\nconst out = [];\nfor (let i = 0; i < inputs.length; i += 100) out.push({ json: { skip: false, url: `${config.hubspot.apiBase}/crm/v3/objects/contacts/batch/update`, body: { inputs: inputs.slice(i, i + 100) }, deals: Math.min(100, inputs.length - i) } });\nreturn out;\n"
+      },
+      "id": "17153819-eddb-4e9e-a407-81805d7506b2",
+      "name": "Build SLA Stamp Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2900,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cfe97473-ebe2-49e9-aff3-5f7c44760f8e",
+              "leftValue": "={{ $json.skip !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5fa5b8c3-62a3-40a1-a655-a0a32bbed2f9",
+      "name": "Stamp Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "e2f3c431-18ad-45ca-a6bd-be8916eaa204",
+      "name": "HubSpot: Batch Update Contact SLA Fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3340,
+        -160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "The ONLY CRM write: sla_status, sla_root_cause, sla_speed_to_lead_minutes, sla_analyzed_at."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// SLA Stamp Result\n// ============================================================================\nconst plan = $('Build SLA Stamp Batches').all().map((i) => i.json);\nif (plan.length === 1 && plan[0].skip) return [{ json: { attempted: false, stamped: 0, failed: 0, note: 'No SLA fields changed' } }];\nlet stamped = 0, failed = 0;\nconst errors = [];\n$input.all().map((i) => i.json).forEach((r, i) => {\n  if (r.error) { failed += plan[i] ? plan[i].deals : 0; errors.push(String(r.error.message || r.error).slice(0, 200)); return; }\n  stamped += (r.results || []).length;\n  for (const e of r.errors || []) { failed++; errors.push(String(e.message || 'error').slice(0, 200)); }\n});\nreturn [{ json: { attempted: true, stamped, failed, errors: errors.slice(0, 20) } }];\n"
+      },
+      "id": "82748d70-5e4e-4155-ac2f-8a9f9cf84e9c",
+      "name": "SLA Stamp Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3560,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// SLA Run Report  (terminal)\n// ============================================================================\nconst { config, safetyDecisions } = $('Config & Safety Gate').first().json;\nconst calc = $('Latency Profiler').first().json;\nconst nb = $('Notification Builder').first().json;\nlet notification = null;\ntry { notification = $('Notification Result').first().json; } catch (e) { notification = null; }\nlet stamp = null;\ntry { stamp = $('SLA Stamp Result').first().json; } catch (e) { stamp = null; }\nconst duplicateOnly = !nb.notifyAllowed && nb.notifyBlockers.length > 0 && nb.notifyBlockers.every((b) => /^Already posted/.test(b));\nconst status = nb.notifyAllowed ? (notification && notification.allOk ? 'POSTED' : 'POST_FAILED') : duplicateOnly ? 'SKIPPED_ALREADY_POSTED' : 'DRY_RUN';\nreturn [{\n  json: {\n    status,\n    mode: config.sandboxMode ? 'SANDBOX' : config.dryRun ? 'LIVE / DRY-RUN' : 'LIVE',\n    window: { start: calc.window.startIso, asOf: calc.window.asOfIso, hours: calc.window.hours },\n    adherencePct: calc.adherencePct,\n    counts: calc.counts,\n    speedToLead: calc.totalStats,\n    bottleneck: calc.bottleneck,\n    rootCauseRanking: calc.rootCauseRanking,\n    trend: calc.trend,\n    dataQuality: calc.dataQuality,\n    guards: calc.guards,\n    notifyBlockedBy: nb.notifyAllowed ? [] : nb.notifyBlockers,\n    notification,\n    stamp,\n    stampBlockedBy: stamp ? [] : config.hubspot.stampBlockers,\n    safetyDecisions,\n    configWarnings: config.warnings,\n    collectionWarnings: calc.collectionWarnings,\n  },\n}];\n"
+      },
+      "id": "7087de36-f10c-46b5-a292-339d466c1fb7",
+      "name": "SLA Run Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3780,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SLA Profiler Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Schedule (Mon 07:53)": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config & Safety Gate": {
+      "main": [
+        [
+          {
+            "node": "Sandbox Mode?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Mode?": {
+      "main": [
+        [
+          {
+            "node": "Load Synthetic Latency Fixture",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Lead Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Synthetic Latency Fixture": {
+      "main": [
+        [
+          {
+            "node": "Normalize Lead Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Lead Search": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Search Leads in Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Search Leads in Window": {
+      "main": [
+        [
+          {
+            "node": "Collect Lead Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Lead Pages": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Fetch Owners",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Fetch Owners": {
+      "main": [
+        [
+          {
+            "node": "Normalize Lead Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Lead Records": {
+      "main": [
+        [
+          {
+            "node": "Latency Profiler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Latency Profiler": {
+      "main": [
+        [
+          {
+            "node": "Notification Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notification Builder": {
+      "main": [
+        [
+          {
+            "node": "Notify Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Build Notification Requests",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dry-Run Preview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Notification Requests": {
+      "main": [
+        [
+          {
+            "node": "Post Slack / Teams Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Slack / Teams Update": {
+      "main": [
+        [
+          {
+            "node": "Notification Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notification Result": {
+      "main": [
+        [
+          {
+            "node": "SLA Stamp Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry-Run Preview": {
+      "main": [
+        [
+          {
+            "node": "SLA Stamp Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SLA Stamp Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Build SLA Stamp Batches",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SLA Run Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build SLA Stamp Batches": {
+      "main": [
+        [
+          {
+            "node": "Stamp Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stamp Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Batch Update Contact SLA Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SLA Stamp Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Batch Update Contact SLA Fields": {
+      "main": [
+        [
+          {
+            "node": "SLA Stamp Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SLA Stamp Result": {
+      "main": [
+        [
+          {
+            "node": "SLA Run Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
