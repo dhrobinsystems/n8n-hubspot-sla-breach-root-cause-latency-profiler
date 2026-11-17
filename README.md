@@ -67,6 +67,8 @@ A total "time to first touch" number tells you that leads wait. It doesn't tell 
 
 ## Architecture
 
+![Workflow Overview](workflow-overview.png)
+
 ```mermaid
 flowchart TD
     T1[Manual Test Trigger] --> CFG
