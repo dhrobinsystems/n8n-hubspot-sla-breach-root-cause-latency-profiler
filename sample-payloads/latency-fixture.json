@@ -1,0 +1,329 @@
+{
+  "_meta": {
+    "synthetic": true,
+    "fixtureVersion": "1.0.0",
+    "description": "Fully synthetic HubSpot contact timing records for offline speed-to-lead profiling. Records carry only record IDs, owner IDs, lead source and timestamps: no names, emails or phone numbers. Owners are fictional (example.com).",
+    "placeholderPortalId": "99000001",
+    "asOf": "2026-11-16T10:00:00Z (Monday)",
+    "window": "168 h (2026-11-09T10:00Z to 2026-11-16T10:00Z)",
+    "scenarios": {
+      "990060001": "MET: fast routing, 8m50s",
+      "990060002": "MET: 11m",
+      "990060003": "BREACHED: enrichment took 38m",
+      "990060004": "BREACHED: enrichment took 22m",
+      "990060005": "BREACHED: webhook ingest took 28m",
+      "990060006": "BREACHED: owner assignment took 45m",
+      "990060007": "OPEN_BREACHED: unassigned for ~3h",
+      "990060008": "OPEN_WITHIN_SLA: in flight, 8m old",
+      "990060009": "OPEN_BREACHED: assigned, never dialled",
+      "990060010": "BREACHED: first dial after 2h",
+      "990060011": "Weekend: BREACHED on wall clock, MET on business clock",
+      "990060012": "MET: enrichment skipped (hops merged)",
+      "990060013": "MET: 30s clock skew within tolerance",
+      "990060014": "DATA_ANOMALY: owner assigned 2h before form submit",
+      "990060015": "DATA_ANOMALY: invalid timestamp",
+      "990060016": "OUT_OF_WINDOW: ignored defensively",
+      "990060017": "DATA_ANOMALY: missing form-submit timestamp",
+      "990060018": "MET: 6m",
+      "990060019": "MET: 12m",
+      "990060020": "MET: 9m (Sunday)"
+    }
+  },
+  "portalId": "99000001",
+  "owners": [
+    {
+      "id": "99100001",
+      "firstName": "Avery",
+      "lastName": "Rep (Mock)",
+      "email": "avery.rep@example.com"
+    },
+    {
+      "id": "99100002",
+      "firstName": "Jordan",
+      "lastName": "Rep (Mock)",
+      "email": "jordan.rep@example.com"
+    },
+    {
+      "id": "99100003",
+      "firstName": "Riley",
+      "lastName": "Rep (Mock)",
+      "email": "riley.rep@example.com"
+    },
+    {
+      "id": "99100004",
+      "firstName": "Morgan",
+      "lastName": "Rep (Mock)",
+      "email": "morgan.rep@example.com"
+    }
+  ],
+  "contacts": [
+    {
+      "id": "990060001",
+      "properties": {
+        "first_conversion_date": "2026-11-10T14:00:00.000Z",
+        "lead_ingested_at": "2026-11-10T14:00:20.000Z",
+        "lead_enriched_at": "2026-11-10T14:01:50.000Z",
+        "hubspot_owner_assigneddate": "2026-11-10T14:02:50.000Z",
+        "hs_sa_first_engagement_date": "2026-11-10T14:08:50.000Z",
+        "hubspot_owner_id": "99100001",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060002",
+      "properties": {
+        "first_conversion_date": "2026-11-11T09:30:00.000Z",
+        "lead_ingested_at": "2026-11-11T09:30:15.000Z",
+        "lead_enriched_at": "2026-11-11T09:31:00.000Z",
+        "hubspot_owner_assigneddate": "2026-11-11T09:32:00.000Z",
+        "hs_sa_first_engagement_date": "2026-11-11T09:41:00.000Z",
+        "hubspot_owner_id": "99100002",
+        "hs_analytics_source": "ORGANIC_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060003",
+      "properties": {
+        "first_conversion_date": "2026-11-11T16:00:00.000Z",
+        "lead_ingested_at": "2026-11-11T16:00:30.000Z",
+        "lead_enriched_at": "2026-11-11T16:38:30.000Z",
+        "hubspot_owner_assigneddate": "2026-11-11T16:39:30.000Z",
+        "hs_sa_first_engagement_date": "2026-11-11T16:50:30.000Z",
+        "hubspot_owner_id": "99100003",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060004",
+      "properties": {
+        "first_conversion_date": "2026-11-12T10:00:00.000Z",
+        "lead_ingested_at": "2026-11-12T10:00:20.000Z",
+        "lead_enriched_at": "2026-11-12T10:22:20.000Z",
+        "hubspot_owner_assigneddate": "2026-11-12T10:24:20.000Z",
+        "hs_sa_first_engagement_date": "2026-11-12T10:36:20.000Z",
+        "hubspot_owner_id": "99100001",
+        "hs_analytics_source": "REFERRALS",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060005",
+      "properties": {
+        "first_conversion_date": "2026-11-12T13:00:00.000Z",
+        "lead_ingested_at": "2026-11-12T13:28:00.000Z",
+        "lead_enriched_at": "2026-11-12T13:29:00.000Z",
+        "hubspot_owner_assigneddate": "2026-11-12T13:30:00.000Z",
+        "hs_sa_first_engagement_date": "2026-11-12T13:40:00.000Z",
+        "hubspot_owner_id": "99100002",
+        "hs_analytics_source": "DIRECT_TRAFFIC",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060006",
+      "properties": {
+        "first_conversion_date": "2026-11-12T15:00:00.000Z",
+        "lead_ingested_at": "2026-11-12T15:00:10.000Z",
+        "lead_enriched_at": "2026-11-12T15:01:10.000Z",
+        "hubspot_owner_assigneddate": "2026-11-12T15:46:10.000Z",
+        "hs_sa_first_engagement_date": "2026-11-12T15:55:10.000Z",
+        "hubspot_owner_id": "99100004",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060007",
+      "properties": {
+        "first_conversion_date": "2026-11-16T07:00:00.000Z",
+        "lead_ingested_at": "2026-11-16T07:00:30.000Z",
+        "lead_enriched_at": "2026-11-16T07:02:00.000Z",
+        "hubspot_owner_assigneddate": "",
+        "hs_sa_first_engagement_date": "",
+        "hubspot_owner_id": "",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060008",
+      "properties": {
+        "first_conversion_date": "2026-11-16T09:52:00.000Z",
+        "lead_ingested_at": "2026-11-16T09:52:20.000Z",
+        "lead_enriched_at": "2026-11-16T09:56:00.000Z",
+        "hubspot_owner_assigneddate": "",
+        "hs_sa_first_engagement_date": "",
+        "hubspot_owner_id": "",
+        "hs_analytics_source": "ORGANIC_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060009",
+      "properties": {
+        "first_conversion_date": "2026-11-15T15:00:00.000Z",
+        "lead_ingested_at": "2026-11-15T15:00:20.000Z",
+        "lead_enriched_at": "2026-11-15T15:01:20.000Z",
+        "hubspot_owner_assigneddate": "2026-11-15T15:03:20.000Z",
+        "hs_sa_first_engagement_date": "",
+        "hubspot_owner_id": "99100003",
+        "hs_analytics_source": "REFERRALS",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060010",
+      "properties": {
+        "first_conversion_date": "2026-11-13T11:00:00.000Z",
+        "lead_ingested_at": "2026-11-13T11:00:15.000Z",
+        "lead_enriched_at": "2026-11-13T11:01:15.000Z",
+        "hubspot_owner_assigneddate": "2026-11-13T11:02:15.000Z",
+        "hs_sa_first_engagement_date": "2026-11-13T13:02:15.000Z",
+        "hubspot_owner_id": "99100004",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060011",
+      "properties": {
+        "first_conversion_date": "2026-11-14T21:00:00.000Z",
+        "lead_ingested_at": "2026-11-14T21:00:20.000Z",
+        "lead_enriched_at": "2026-11-14T21:01:20.000Z",
+        "hubspot_owner_assigneddate": "2026-11-14T21:02:20.000Z",
+        "hs_sa_first_engagement_date": "2026-11-16T09:10:00.000Z",
+        "hubspot_owner_id": "99100002",
+        "hs_analytics_source": "ORGANIC_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060012",
+      "properties": {
+        "first_conversion_date": "2026-11-13T14:00:00.000Z",
+        "lead_ingested_at": "2026-11-13T14:00:30.000Z",
+        "lead_enriched_at": "",
+        "hubspot_owner_assigneddate": "2026-11-13T14:03:30.000Z",
+        "hs_sa_first_engagement_date": "2026-11-13T14:12:30.000Z",
+        "hubspot_owner_id": "99100001",
+        "hs_analytics_source": "DIRECT_TRAFFIC",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060013",
+      "properties": {
+        "first_conversion_date": "2026-11-13T15:00:00.000Z",
+        "lead_ingested_at": "2026-11-13T15:01:00.000Z",
+        "lead_enriched_at": "2026-11-13T15:00:30.000Z",
+        "hubspot_owner_assigneddate": "2026-11-13T15:02:00.000Z",
+        "hs_sa_first_engagement_date": "2026-11-13T15:10:00.000Z",
+        "hubspot_owner_id": "99100003",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060014",
+      "properties": {
+        "first_conversion_date": "2026-11-14T10:00:00.000Z",
+        "lead_ingested_at": "2026-11-14T10:00:20.000Z",
+        "lead_enriched_at": "2026-11-14T10:01:00.000Z",
+        "hubspot_owner_assigneddate": "2026-11-14T08:00:00.000Z",
+        "hs_sa_first_engagement_date": "2026-11-14T10:20:00.000Z",
+        "hubspot_owner_id": "99100004",
+        "hs_analytics_source": "REFERRALS",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060015",
+      "properties": {
+        "first_conversion_date": "2026-11-14T11:00:00.000Z",
+        "lead_ingested_at": "not-a-date",
+        "lead_enriched_at": "2026-11-14T11:02:00.000Z",
+        "hubspot_owner_assigneddate": "2026-11-14T11:03:00.000Z",
+        "hs_sa_first_engagement_date": "2026-11-14T11:10:00.000Z",
+        "hubspot_owner_id": "99100001",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060016",
+      "properties": {
+        "first_conversion_date": "2026-11-02T10:00:00.000Z",
+        "lead_ingested_at": "2026-11-02T10:00:20.000Z",
+        "lead_enriched_at": "2026-11-02T10:01:20.000Z",
+        "hubspot_owner_assigneddate": "2026-11-02T10:02:20.000Z",
+        "hs_sa_first_engagement_date": "2026-11-02T10:12:20.000Z",
+        "hubspot_owner_id": "99100002",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060017",
+      "properties": {
+        "first_conversion_date": "",
+        "lead_ingested_at": "2026-11-14T12:00:20.000Z",
+        "lead_enriched_at": "2026-11-14T12:01:20.000Z",
+        "hubspot_owner_assigneddate": "2026-11-14T12:02:20.000Z",
+        "hs_sa_first_engagement_date": "2026-11-14T12:12:20.000Z",
+        "hubspot_owner_id": "99100003",
+        "hs_analytics_source": "ORGANIC_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060018",
+      "properties": {
+        "first_conversion_date": "2026-11-10T10:00:00.000Z",
+        "lead_ingested_at": "2026-11-10T10:00:10.000Z",
+        "lead_enriched_at": "2026-11-10T10:01:00.000Z",
+        "hubspot_owner_assigneddate": "2026-11-10T10:01:40.000Z",
+        "hs_sa_first_engagement_date": "2026-11-10T10:06:00.000Z",
+        "hubspot_owner_id": "99100001",
+        "hs_analytics_source": "PAID_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060019",
+      "properties": {
+        "first_conversion_date": "2026-11-13T09:00:00.000Z",
+        "lead_ingested_at": "2026-11-13T09:00:30.000Z",
+        "lead_enriched_at": "2026-11-13T09:02:00.000Z",
+        "hubspot_owner_assigneddate": "2026-11-13T09:04:00.000Z",
+        "hs_sa_first_engagement_date": "2026-11-13T09:12:00.000Z",
+        "hubspot_owner_id": "99100003",
+        "hs_analytics_source": "REFERRALS",
+        "lifecyclestage": "lead"
+      }
+    },
+    {
+      "id": "990060020",
+      "properties": {
+        "first_conversion_date": "2026-11-15T11:00:00.000Z",
+        "lead_ingested_at": "2026-11-15T11:00:15.000Z",
+        "lead_enriched_at": "2026-11-15T11:01:15.000Z",
+        "hubspot_owner_assigneddate": "2026-11-15T11:02:15.000Z",
+        "hs_sa_first_engagement_date": "2026-11-15T11:09:00.000Z",
+        "hubspot_owner_id": "99100004",
+        "hs_analytics_source": "ORGANIC_SEARCH",
+        "lifecyclestage": "lead"
+      }
+    }
+  ],
+  "previousSnapshot": {
+    "windowEnd": "2026-11-09T10:00:00.000Z",
+    "adherencePct": "70.0",
+    "breaches": 4,
+    "openBreaches": 1,
+    "p90TotalSec": 2400,
+    "topRootCause": "ASSIGNMENT_DELAY"
+  }
+}
